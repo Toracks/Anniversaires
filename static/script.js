@@ -1,3 +1,6 @@
+// ============================================================================
+// État global de l'application
+// ============================================================================
 let anniversaires = [];       // liste chargée depuis l'API
 let dateReference = new Date(); // date "curseur" utilisée pour la navigation
 let vueActuelle = 'month';    // 'month' | 'week' | 'day'
@@ -6,18 +9,37 @@ const MOIS_FR = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin',
   'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 const JOURS_FR = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'];
 
+// ============================================================================
+// Petit wrapper autour de fetch() : si la session a expiré (401), on renvoie
+// directement vers la page de connexion plutôt que de laisser planter le JS.
+// ============================================================================
+async function apiFetch(url, options = {}) {
+  const reponse = await fetch(url, options);
+  if (reponse.status === 401) {
+    window.location.href = '/login';
+    return null;
+  }
+  return reponse;
+}
 
+// ============================================================================
+// Chargement des données depuis l'API Flask
+// ============================================================================
 async function chargerAnniversaires() {
-  const reponse = await fetch('/api/anniversaires');
+  const reponse = await apiFetch('/api/anniversaires');
+  if (!reponse) return;
   anniversaires = await reponse.json();
   render();
 }
 
-
+// Renvoie la liste des anniversaires tombant un jour/mois donné (toutes années confondues)
 function anniversairesDuJour(jour, mois) {
   return anniversaires.filter(a => a.jour === jour && a.mois === mois);
 }
 
+// ============================================================================
+// Rendu général : dispatch selon la vue active
+// ============================================================================
 function render() {
   document.getElementById('vueMois').style.display = vueActuelle === 'month' ? '' : 'none';
   document.getElementById('vueSemaine').style.display = vueActuelle === 'week' ? '' : 'none';
@@ -32,7 +54,9 @@ function render() {
   else renderJour();
 }
 
-
+// ============================================================================
+// Vue MOIS
+// ============================================================================
 function renderMois() {
   const annee = dateReference.getFullYear();
   const mois = dateReference.getMonth(); // 0-indexé
@@ -111,9 +135,11 @@ function renderMois() {
   }
 }
 
-
+// ============================================================================
+// Vue SEMAINE
+// ============================================================================
 function renderSemaine() {
-
+  // Trouver le lundi de la semaine contenant dateReference
   const d = new Date(dateReference);
   let decalage = d.getDay() - 1;
   if (decalage < 0) decalage = 6;
@@ -159,6 +185,9 @@ function renderSemaine() {
   }
 }
 
+// ============================================================================
+// Vue JOUR
+// ============================================================================
 function renderJour() {
   const jour = dateReference.getDate();
   const mois = dateReference.getMonth() + 1;
@@ -179,6 +208,7 @@ function renderJour() {
   entries.forEach(a => container.appendChild(creerLignePersonne(a)));
 }
 
+// Construit une ligne "personne" réutilisée dans la vue jour et le panneau détail
 function creerLignePersonne(a) {
   const row = document.createElement('div');
   row.className = 'person-row';
@@ -214,7 +244,9 @@ function creerLignePersonne(a) {
   return row;
 }
 
-
+// ============================================================================
+// Panneau détail d'un jour (ouvert au clic sur une case du mois/semaine)
+// ============================================================================
 let jourSelectionne = null; // { jour, mois, annee }
 
 function ouvrirDetailJour(jour, mois, annee) {
@@ -248,7 +280,9 @@ document.getElementById('btnAjouterDepuisDetail').addEventListener('click', () =
   ouvrirFormulaire(null, prefill);
 });
 
-
+// ============================================================================
+// Formulaire ajout / modification
+// ============================================================================
 function ouvrirFormulaire(anniversaire = null, prefill = null) {
   const form = document.getElementById('formAnniversaire');
   form.reset();
@@ -282,19 +316,20 @@ document.getElementById('btnAnnulerForm').addEventListener('click', () => {
   document.getElementById('overlayForm').classList.add('hidden');
 });
 
+// Bouton "calendrier" à côté du champ texte : ouvre le sélecteur natif
 document.getElementById('btnOuvrirPicker').addEventListener('click', () => {
   const picker = document.getElementById('fDatePicker');
   picker.showPicker ? picker.showPicker() : picker.click();
 });
 
-
+// Quand une date est choisie via le sélecteur natif, on remplit le champ texte + année
 document.getElementById('fDatePicker').addEventListener('change', (e) => {
   const [an, mo, jr] = e.target.value.split('-');
   document.getElementById('fDateTexte').value = `${jr}/${mo}/${an}`;
   document.getElementById('fAnnee').value = an;
 });
 
-
+// Parse le champ texte JJ/MM ou JJ/MM/AAAA -> { jour, mois, annee|null }
 function parserDateTexte(texte) {
   const parties = texte.trim().split('/');
   if (parties.length < 2) return null;
@@ -339,11 +374,12 @@ document.getElementById('formAnniversaire').addEventListener('submit', async (e)
   try {
     const url = id ? `/api/anniversaires/${id}` : '/api/anniversaires';
     const methode = id ? 'PUT' : 'POST';
-    const reponse = await fetch(url, {
+    const reponse = await apiFetch(url, {
       method: methode,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    if (!reponse) return;
 
     if (!reponse.ok) {
       const err = await reponse.json();
@@ -360,12 +396,15 @@ document.getElementById('formAnniversaire').addEventListener('submit', async (e)
 
 async function supprimerAnniversaire(id) {
   if (!confirm('Supprimer cet anniversaire ?')) return;
-  await fetch(`/api/anniversaires/${id}`, { method: 'DELETE' });
+  const reponse = await apiFetch(`/api/anniversaires/${id}`, { method: 'DELETE' });
+  if (!reponse) return;
   document.getElementById('overlayDetail').classList.add('hidden');
   await chargerAnniversaires();
 }
 
-
+// ============================================================================
+// Navigation (précédent / suivant / aujourd'hui) + changement de vue
+// ============================================================================
 document.getElementById('btnPrev').addEventListener('click', () => {
   if (vueActuelle === 'month') dateReference.setMonth(dateReference.getMonth() - 1);
   else if (vueActuelle === 'week') dateReference.setDate(dateReference.getDate() - 7);
@@ -392,6 +431,9 @@ document.querySelectorAll('.view-toggle button').forEach(btn => {
   });
 });
 
+// ============================================================================
+// Recherche par prénom (filtrage côté client sur les données déjà chargées)
+// ============================================================================
 const rechercheInput = document.getElementById('rechercheInput');
 const rechercheResultats = document.getElementById('rechercheResultats');
 
@@ -431,4 +473,7 @@ document.addEventListener('click', (e) => {
   if (!e.target.closest('.search-wrap')) rechercheResultats.classList.add('hidden');
 });
 
+// ============================================================================
+// Démarrage
+// ============================================================================
 chargerAnniversaires();
