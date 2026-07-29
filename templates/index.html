@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Anniversaires</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app">
+
+    <div class="topbar">
+      <h1>🎂 Anniversaires</h1>
+      <div class="search-wrap">
+        <input type="text" id="rechercheInput" placeholder="Chercher un prénom...">
+        <div class="search-results hidden" id="rechercheResultats"></div>
+      </div>
+      <button class="btn btn-primary" id="btnAjouter">+ Ajouter</button>
+    </div>
+
+    <div class="controls">
+      <div class="nav-group">
+        <button class="icon" id="btnPrev">‹</button>
+        <span class="period-label" id="periodLabel"></span>
+        <button class="icon" id="btnNext">›</button>
+        <button class="btn btn-ghost" id="btnAujourdhui">Aujourd'hui</button>
+      </div>
+      <div class="view-toggle">
+        <button data-view="day">Jour</button>
+        <button data-view="week">Semaine</button>
+        <button data-view="month" class="active">Mois</button>
+      </div>
+    </div>
+
+    <div id="vueMois">
+      <div class="weekdays">
+        <span>Lun</span><span>Mar</span><span>Mer</span><span>Jeu</span><span>Ven</span><span>Sam</span><span>Dim</span>
+      </div>
+      <div class="month-grid" id="monthGrid"></div>
+    </div>
+
+    <div id="vueSemaine" style="display:none;">
+      <div class="week-grid" id="weekGrid"></div>
+    </div>
+
+    <div id="vueJour" style="display:none;">
+      <div class="day-view" id="dayView"></div>
+    </div>
+
+  </div>
+
+
+  <div class="overlay hidden" id="overlayDetail">
+    <div class="modal">
+      <h2 id="detailTitre">Anniversaires</h2>
+      <div id="detailContenu"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="btnFermerDetail">Fermer</button>
+        <button class="btn btn-primary" id="btnAjouterDepuisDetail">+ Ajouter ce jour</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal ajout / modification -->
+  <div class="overlay hidden" id="overlayForm">
+    <div class="modal">
+      <h2 id="formTitre">Ajouter un anniversaire</h2>
+      <form id="formAnniversaire">
+        <input type="hidden" id="fId">
+
+        <div class="field">
+          <label for="fPrenom">Prénom *</label>
+          <input type="text" id="fPrenom" required>
+        </div>
+
+        <div class="field">
+          <label for="fNom">Nom</label>
+          <input type="text" id="fNom">
+        </div>
+
+        <div class="field">
+          <label for="fDateTexte">Date de naissance (JJ/MM ou JJ/MM/AAAA) *</label>
+          <div class="date-input-group">
+            <input type="text" id="fDateTexte" placeholder="11/04/1990" required>
+            <button type="button" class="date-picker-btn" id="btnOuvrirPicker" title="Choisir sur un calendrier">📅</button>
+            <input type="date" id="fDatePicker" class="hidden-date-input">
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="fAnnee">Année de naissance</label>
+            <input type="number" id="fAnnee" placeholder="1990" min="1900" max="2100">
+          </div>
+          <div class="field">
+            <label for="fHeure">Heure</label>
+            <input type="time" id="fHeure">
+          </div>
+        </div>
+
+        <div class="field-error" id="formErreur"></div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" id="btnAnnulerForm">Annuler</button>
+          <button type="submit" class="btn btn-primary">Enregistrer</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/static/script.js"></script>
+</body>
+</html>
