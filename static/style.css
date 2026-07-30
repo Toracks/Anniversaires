@@ -7,9 +7,9 @@
   --border: #2a2a2e;
   --text: #ececec;
   --text-muted: #8b8b92;
-  --accent: #d4a24e;
-  --accent-soft: rgba(212, 162, 78, 0.16);
-  --accent-glow: rgba(212, 162, 78, 0.55);
+  --accent: #8ad44e;
+  --accent-soft: rgba(94, 212, 78, 0.16);
+  --accent-glow: rgba(154, 212, 78, 0.55);
   --danger: #b3543d;
   --danger-soft: rgba(179, 84, 61, 0.16);
   --radius: 10px;
