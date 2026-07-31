@@ -494,19 +494,25 @@ async function activerNotifications() {
   }
 
   try {
+    alert("Étape 1 : demande d'autorisation...");
     const permission = await Notification.requestPermission();
     if (permission !== 'granted') {
-      alert("Tu as refusé les notifications. Tu peux changer ça dans les paramètres de Chrome pour ce site.");
+      alert("Refusé : " + permission);
       return;
     }
 
-    const registration = await navigator.serviceWorker.register('/static/sw.js');
+    alert("Étape 2 : enregistrement du service worker...");
+    const registration = await navigator.serviceWorker.register('/sw.js');
+    alert("Étape 3 : attente de l'activation...");
     await navigator.serviceWorker.ready;
 
+    alert("Étape 4 : récupération de la clé publique...");
     const reponseCle = await apiFetch('/api/vapid-public-key');
-    if (!reponseCle) return;
+    if (!reponseCle) { alert("Échec étape 4 : pas de réponse (redirection login ?)"); return; }
     const { publicKey } = await reponseCle.json();
+    alert("Clé reçue : " + (publicKey ? publicKey.substring(0, 15) + "..." : "VIDE"));
 
+    alert("Étape 5 : abonnement au push...");
     let subscription = await registration.pushManager.getSubscription();
     if (!subscription) {
       subscription = await registration.pushManager.subscribe({
@@ -514,19 +520,20 @@ async function activerNotifications() {
         applicationServerKey: urlBase64ToUint8Array(publicKey),
       });
     }
+    alert("Étape 6 : abonnement obtenu, envoi au serveur...");
 
     const reponse = await apiFetch('/api/push-subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(subscription.toJSON()),
     });
-    if (!reponse) return;
+    if (!reponse) { alert("Échec étape 6 : pas de réponse"); return; }
+    alert("Étape 7 : terminé, statut = " + reponse.status);
 
     bouton.textContent = '🔔 Notifications activées';
     bouton.disabled = true;
   } catch (err) {
-    console.error(err);
-    alert("Une erreur est survenue lors de l'activation des notifications.");
+    alert("ERREUR : " + err.message);
   }
 }
 
@@ -536,7 +543,7 @@ document.getElementById('btnNotifications').addEventListener('click', activerNot
 (async function verifierAbonnementExistant() {
   if (!('serviceWorker' in navigator)) return;
   try {
-    const registration = await navigator.serviceWorker.getRegistration('/static/sw.js');
+    const registration = await navigator.serviceWorker.getRegistration('/sw.js');
     if (!registration) return;
     const subscription = await registration.pushManager.getSubscription();
     if (subscription) {
