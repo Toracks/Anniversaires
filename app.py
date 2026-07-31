@@ -88,6 +88,17 @@ def index():
 
 
 # ---------------------------------------------------------------------------
+# Sert le service worker depuis la racine (/sw.js) plutôt que /static/sw.js :
+# un service worker ne peut contrôler que les pages situées dans son propre
+# dossier (ou en dessous) par défaut. En le servant depuis la racine, il
+# couvre tout le site, y compris la page d'accueil "/".
+# ---------------------------------------------------------------------------
+@app.route("/sw.js")
+def service_worker():
+    return send_from_directory(app.static_folder, "sw.js")
+
+
+# ---------------------------------------------------------------------------
 # Connexion / déconnexion
 # ---------------------------------------------------------------------------
 @app.route("/login", methods=["GET", "POST"])
