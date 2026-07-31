@@ -235,6 +235,11 @@ def ajouter_anniversaire():
     )
     nouvel_anniversaire = cur.fetchone()
     conn.commit()
+
+    # Si la date ajoutée tombe aujourd'hui, on notifie tout de suite plutôt
+    # que d'attendre la vérification quotidienne du lendemain
+    notifier_si_aujourdhui(nouvel_anniversaire["id"], prenom, nom, jour, mois, cur, conn)
+
     cur.close()
     conn.close()
 
@@ -286,11 +291,17 @@ def modifier_anniversaire(anniversaire_id):
     )
     resultat = cur.fetchone()
     conn.commit()
-    cur.close()
-    conn.close()
 
     if resultat is None:
+        cur.close()
+        conn.close()
         return jsonify({"erreur": "Anniversaire introuvable."}), 404
+
+    # Si la nouvelle date tombe aujourd'hui, on notifie tout de suite
+    notifier_si_aujourdhui(anniversaire_id, prenom, nom, jour, mois, cur, conn)
+
+    cur.close()
+    conn.close()
 
     if resultat["heure"] is not None:
         resultat["heure"] = resultat["heure"].strftime("%H:%M")
@@ -323,6 +334,69 @@ def supprimer_anniversaire(anniversaire_id):
 # Lancement en local (sur Render, c'est gunicorn qui démarre l'appli,
 # donc ce bloc ne sert que quand tu testes sur ta propre machine).
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Envoie une notification push à tous les appareils abonnés pour un
+# anniversaire donné. Réutilisée à la fois par la vérification quotidienne
+# (cron) et par l'ajout/modification en direct (si la date tombe aujourd'hui).
+# Renvoie le nombre d'appareils notifiés avec succès.
+# ---------------------------------------------------------------------------
+def envoyer_notification_push(prenom, nom, cur, conn):
+    nom_complet = prenom
+    if nom:
+        nom_complet += f" {nom}"
+
+    titre = f"🎂 Aujourd'hui c'est l'anniversaire de {prenom} !"
+    corps = f"{nom_complet} fête son anniversaire aujourd'hui. Clique pour plus de détails."
+    payload = json.dumps({"titre": titre, "corps": corps})
+
+    cur.execute("SELECT id, endpoint, p256dh, auth FROM push_subscriptions")
+    abonnements = cur.fetchall()
+
+    nb_notifies = 0
+    for abonnement in abonnements:
+        subscription_info = {
+            "endpoint": abonnement["endpoint"],
+            "keys": {"p256dh": abonnement["p256dh"], "auth": abonnement["auth"]},
+        }
+        try:
+            webpush(
+                subscription_info=subscription_info,
+                data=payload,
+                vapid_private_key=_vapid_private_key_path,
+                vapid_claims={"sub": f"mailto:{VAPID_CONTACT_EMAIL}"},
+            )
+            nb_notifies += 1
+        except WebPushException as err:
+            if err.response is not None and err.response.status_code == 410:
+                cur.execute("DELETE FROM push_subscriptions WHERE id = %s", (abonnement["id"],))
+                conn.commit()
+
+    return nb_notifies
+
+
+# ---------------------------------------------------------------------------
+# Si un anniversaire tombe aujourd'hui et n'a pas encore été notifié cette
+# année, envoie la notification tout de suite et marque l'année comme faite
+# (utile quand on ajoute/modifie un anniversaire après l'heure du cron).
+# ---------------------------------------------------------------------------
+def notifier_si_aujourdhui(anniversaire_id, prenom, nom, jour, mois, cur, conn):
+    aujourdhui = date.today()
+    if jour != aujourdhui.day or mois != aujourdhui.month:
+        return
+
+    cur.execute("SELECT derniere_annee_notifiee FROM anniversaires WHERE id = %s", (anniversaire_id,))
+    ligne = cur.fetchone()
+    if ligne and ligne["derniere_annee_notifiee"] == aujourdhui.year:
+        return  # déjà notifié aujourd'hui (par le cron ou un envoi précédent)
+
+    envoyer_notification_push(prenom, nom, cur, conn)
+    cur.execute(
+        "UPDATE anniversaires SET derniere_annee_notifiee = %s WHERE id = %s",
+        (aujourdhui.year, anniversaire_id),
+    )
+    conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # GET /api/vapid-public-key
 # Fournit la clé publique VAPID au JavaScript, pour qu'il puisse s'abonner.
@@ -410,38 +484,9 @@ def verifier_anniversaires():
 
     nb_notifies = 0
     for anniversaire in anniversaires_du_jour:
-        nom_complet = anniversaire["prenom"]
-        if anniversaire["nom"]:
-            nom_complet += f" {anniversaire['nom']}"
-
-        titre = f"🎂 Aujourd'hui c'est l'anniversaire de {anniversaire['prenom']} !"
-        corps = f"{nom_complet} fête son anniversaire aujourd'hui. Clique pour plus de détails."
-
-        payload = json.dumps({"titre": titre, "corps": corps})
-
-        for abonnement in abonnements:
-            subscription_info = {
-                "endpoint": abonnement["endpoint"],
-                "keys": {"p256dh": abonnement["p256dh"], "auth": abonnement["auth"]},
-            }
-            try:
-                webpush(
-                    subscription_info=subscription_info,
-                    data=payload,
-                    vapid_private_key=_vapid_private_key_path,
-                    vapid_claims={"sub": f"mailto:{VAPID_CONTACT_EMAIL}"},
-                )
-                nb_notifies += 1
-            except WebPushException as err:
-                # Code 410 = cet abonnement n'existe plus (l'utilisateur a
-                # désactivé les notifications, changé de navigateur, etc.)
-                # On le supprime de la base pour ne plus essayer de lui écrire.
-                if err.response is not None and err.response.status_code == 410:
-                    cur.execute(
-                        "DELETE FROM push_subscriptions WHERE id = %s",
-                        (abonnement["id"],),
-                    )
-                    conn.commit()
+        nb_notifies += envoyer_notification_push(
+            anniversaire["prenom"], anniversaire["nom"], cur, conn
+        )
 
         # On marque cet anniversaire comme notifié pour cette année
         cur.execute(
