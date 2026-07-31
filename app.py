@@ -1,10 +1,13 @@
 import os
+import json
+import tempfile
 from functools import wraps
-from datetime import timedelta
+from datetime import timedelta, date
 import psycopg2
 import psycopg2.extras
 from flask import Flask, request, jsonify, send_from_directory, session, redirect, url_for, render_template
 from werkzeug.security import check_password_hash
+from pywebpush import webpush, WebPushException
 from dotenv import load_dotenv
 
 # Charge les variables du fichier .env (utile en local ; sur Render, les
@@ -20,6 +23,24 @@ app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 APP_PASSWORD_HASH = os.environ.get("APP_PASSWORD_HASH")
+
+# ---------------------------------------------------------------------------
+# Configuration des notifications push (VAPID)
+# ---------------------------------------------------------------------------
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")
+VAPID_CONTACT_EMAIL = os.environ.get("EMAIL_DESTINATAIRE", "contact@example.com")
+CRON_SECRET = os.environ.get("CRON_SECRET")
+
+# pywebpush a besoin d'un chemin de fichier vers la clé privée, pas du texte
+# directement : on écrit donc le contenu de la variable d'environnement dans
+# un fichier temporaire au démarrage de l'application.
+_vapid_private_key_path = None
+_vapid_pem_content = os.environ.get("VAPID_PRIVATE_KEY_PEM")
+if _vapid_pem_content:
+    _fichier_temp = tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False)
+    _fichier_temp.write(_vapid_pem_content)
+    _fichier_temp.close()
+    _vapid_private_key_path = _fichier_temp.name
 
 
 # ---------------------------------------------------------------------------
@@ -291,5 +312,141 @@ def supprimer_anniversaire(anniversaire_id):
 # Lancement en local (sur Render, c'est gunicorn qui démarre l'appli,
 # donc ce bloc ne sert que quand tu testes sur ta propre machine).
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# GET /api/vapid-public-key
+# Fournit la clé publique VAPID au JavaScript, pour qu'il puisse s'abonner.
+# ---------------------------------------------------------------------------
+@app.route("/api/vapid-public-key", methods=["GET"])
+@login_required_api
+def vapid_public_key():
+    return jsonify({"publicKey": VAPID_PUBLIC_KEY})
+
+
+# ---------------------------------------------------------------------------
+# POST /api/push-subscribe
+# Enregistre un nouvel abonnement aux notifications (un par appareil/navigateur).
+# ---------------------------------------------------------------------------
+@app.route("/api/push-subscribe", methods=["POST"])
+@login_required_api
+def push_subscribe():
+    data = request.get_json(silent=True) or {}
+    endpoint = data.get("endpoint")
+    keys = data.get("keys", {})
+    p256dh = keys.get("p256dh")
+    auth = keys.get("auth")
+
+    if not endpoint or not p256dh or not auth:
+        return jsonify({"erreur": "Abonnement invalide."}), 400
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    # ON CONFLICT : si cet appareil est déjà abonné (même endpoint), on ne
+    # duplique pas la ligne, on met juste à jour ses clés au cas où.
+    cur.execute(
+        """
+        INSERT INTO push_subscriptions (endpoint, p256dh, auth)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (endpoint) DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth
+        """,
+        (endpoint, p256dh, auth),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return jsonify({"succes": True}), 201
+
+
+# ---------------------------------------------------------------------------
+# GET /cron/verifier-anniversaires?secret=...
+# Route appelée une fois par jour par cron-job.org : vérifie les anniversaires
+# du jour et envoie une notification push à tous les appareils abonnés.
+# Protégée par un secret (passé en paramètre d'URL) pour éviter que n'importe
+# qui sur internet puisse la déclencher.
+# ---------------------------------------------------------------------------
+@app.route("/cron/verifier-anniversaires", methods=["GET"])
+def verifier_anniversaires():
+    secret_fourni = request.args.get("secret")
+    if not CRON_SECRET or secret_fourni != CRON_SECRET:
+        return jsonify({"erreur": "Non autorisé."}), 403
+
+    aujourdhui = date.today()
+    annee_courante = aujourdhui.year
+
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    # On sélectionne les anniversaires du jour, pas encore notifiés cette année
+    cur.execute(
+        """
+        SELECT id, prenom, nom, annee
+        FROM anniversaires
+        WHERE jour = %s AND mois = %s
+          AND (derniere_annee_notifiee IS NULL OR derniere_annee_notifiee != %s)
+        """,
+        (aujourdhui.day, aujourdhui.month, annee_courante),
+    )
+    anniversaires_du_jour = cur.fetchall()
+
+    if not anniversaires_du_jour:
+        cur.close()
+        conn.close()
+        return jsonify({"message": "Aucun anniversaire aujourd'hui.", "notifies": 0})
+
+    # Récupère tous les appareils abonnés aux notifications
+    cur.execute("SELECT id, endpoint, p256dh, auth FROM push_subscriptions")
+    abonnements = cur.fetchall()
+
+    nb_notifies = 0
+    for anniversaire in anniversaires_du_jour:
+        nom_complet = anniversaire["prenom"]
+        if anniversaire["nom"]:
+            nom_complet += f" {anniversaire['nom']}"
+
+        titre = f"🎂 Aujourd'hui c'est l'anniversaire de {anniversaire['prenom']} !"
+        corps = f"{nom_complet} fête son anniversaire aujourd'hui. Clique pour plus de détails."
+
+        payload = json.dumps({"titre": titre, "corps": corps})
+
+        for abonnement in abonnements:
+            subscription_info = {
+                "endpoint": abonnement["endpoint"],
+                "keys": {"p256dh": abonnement["p256dh"], "auth": abonnement["auth"]},
+            }
+            try:
+                webpush(
+                    subscription_info=subscription_info,
+                    data=payload,
+                    vapid_private_key=_vapid_private_key_path,
+                    vapid_claims={"sub": f"mailto:{VAPID_CONTACT_EMAIL}"},
+                )
+                nb_notifies += 1
+            except WebPushException as err:
+                # Code 410 = cet abonnement n'existe plus (l'utilisateur a
+                # désactivé les notifications, changé de navigateur, etc.)
+                # On le supprime de la base pour ne plus essayer de lui écrire.
+                if err.response is not None and err.response.status_code == 410:
+                    cur.execute(
+                        "DELETE FROM push_subscriptions WHERE id = %s",
+                        (abonnement["id"],),
+                    )
+                    conn.commit()
+
+        # On marque cet anniversaire comme notifié pour cette année
+        cur.execute(
+            "UPDATE anniversaires SET derniere_annee_notifiee = %s WHERE id = %s",
+            (annee_courante, anniversaire["id"]),
+        )
+        conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return jsonify({
+        "message": f"{len(anniversaires_du_jour)} anniversaire(s) traité(s).",
+        "notifies": nb_notifies,
+    })
+
+
 if __name__ == "__main__":
     app.run(debug=True, port=5000)

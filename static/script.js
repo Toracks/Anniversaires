@@ -474,6 +474,80 @@ document.addEventListener('click', (e) => {
 });
 
 // ============================================================================
+// Notifications push : enregistrement du service worker + abonnement
+// ============================================================================
+
+// Convertit la clé publique VAPID (format texte) au format binaire attendu par le navigateur
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  return Uint8Array.from([...rawData].map((char) => char.charCodeAt(0)));
+}
+
+async function activerNotifications() {
+  const bouton = document.getElementById('btnNotifications');
+
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    alert("Ton navigateur ne supporte pas les notifications push.");
+    return;
+  }
+
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') {
+      alert("Tu as refusé les notifications. Tu peux changer ça dans les paramètres de Chrome pour ce site.");
+      return;
+    }
+
+    const registration = await navigator.serviceWorker.register('/static/sw.js');
+    await navigator.serviceWorker.ready;
+
+    const reponseCle = await apiFetch('/api/vapid-public-key');
+    if (!reponseCle) return;
+    const { publicKey } = await reponseCle.json();
+
+    let subscription = await registration.pushManager.getSubscription();
+    if (!subscription) {
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey),
+      });
+    }
+
+    const reponse = await apiFetch('/api/push-subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(subscription.toJSON()),
+    });
+    if (!reponse) return;
+
+    bouton.textContent = '🔔 Notifications activées';
+    bouton.disabled = true;
+  } catch (err) {
+    console.error(err);
+    alert("Une erreur est survenue lors de l'activation des notifications.");
+  }
+}
+
+document.getElementById('btnNotifications').addEventListener('click', activerNotifications);
+
+// Si on est déjà abonné (revisite de la page), on met à jour le bouton en conséquence
+(async function verifierAbonnementExistant() {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    const registration = await navigator.serviceWorker.getRegistration('/static/sw.js');
+    if (!registration) return;
+    const subscription = await registration.pushManager.getSubscription();
+    if (subscription) {
+      const bouton = document.getElementById('btnNotifications');
+      bouton.textContent = '🔔 Notifications activées';
+      bouton.disabled = true;
+    }
+  } catch (err) { /* silencieux, pas critique */ }
+})();
+
+// ============================================================================
 // Démarrage
 // ============================================================================
 chargerAnniversaires();
