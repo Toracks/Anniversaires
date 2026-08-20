@@ -72,14 +72,20 @@ def envoyer_notification_push(prenom, nom, cur, conn):
             "keys": {"p256dh": abonnement["p256dh"], "auth": abonnement["auth"]},
         }
         try:
-            webpush(
+            reponse = webpush(
                 subscription_info=subscription_info,
                 data=payload,
                 vapid_private_key=_vapid_private_key_path,
                 vapid_claims={"sub": f"mailto:{VAPID_CONTACT_EMAIL}"},
+                headers={"Urgency": "high"},
+                ttl=86400,
             )
+            print(f"[PUSH] Succès pour endpoint {abonnement['endpoint'][:50]}... -> statut {reponse.status_code if hasattr(reponse, 'status_code') else 'inconnu'}")
             nb_notifies += 1
         except WebPushException as err:
+            code = err.response.status_code if err.response is not None else "inconnu"
+            texte = err.response.text if err.response is not None else "aucune reponse"
+            print(f"[PUSH] ECHEC pour endpoint {abonnement['endpoint'][:50]}... -> statut {code} -> {texte}")
             if err.response is not None and err.response.status_code == 410:
                 cur.execute("DELETE FROM push_subscriptions WHERE id = %s", (abonnement["id"],))
                 conn.commit()
