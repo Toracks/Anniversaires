@@ -111,6 +111,12 @@ def executer_verification_quotidienne():
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     cur.execute(
+        """
+        SELECT id, prenom, nom
+        FROM anniversaires
+        WHERE jour = %s AND mois = %s
+          AND (derniere_annee_notifiee IS NULL OR derniere_annee_notifiee != %s)
+        """,
         (aujourdhui.day, aujourdhui.month, annee_courante),
     )
     anniversaires_du_jour = cur.fetchall()
@@ -165,6 +171,11 @@ def liste_anniversaires():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
+        """
+        SELECT id, prenom, nom, jour, mois, annee, heure
+        FROM anniversaires
+        ORDER BY mois, jour
+        """
     )
     resultats = cur.fetchall()
     cur.close()
@@ -186,6 +197,12 @@ def recherche_anniversaires():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
+        """
+        SELECT id, prenom, nom, jour, mois, annee, heure
+        FROM anniversaires
+        WHERE prenom ILIKE %s
+        ORDER BY mois, jour
+        """,
         (f"%{terme}%",),
     )
     resultats = cur.fetchall()
@@ -228,6 +245,11 @@ def ajouter_anniversaire():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
+        """
+        INSERT INTO anniversaires (prenom, nom, jour, mois, annee, heure)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING id, prenom, nom, jour, mois, annee, heure
+        """,
         (prenom, nom, jour, mois, annee, heure),
     )
     nouvel_anniversaire = cur.fetchone()
@@ -270,6 +292,13 @@ def modifier_anniversaire(anniversaire_id):
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
+        """
+        UPDATE anniversaires
+        SET prenom = %s, nom = %s, jour = %s, mois = %s, annee = %s, heure = %s,
+            derniere_annee_notifiee = NULL
+        WHERE id = %s
+        RETURNING id, prenom, nom, jour, mois, annee, heure
+        """,
         (prenom, nom, jour, mois, annee, heure, anniversaire_id),
     )
     resultat = cur.fetchone()
@@ -326,6 +355,11 @@ def push_subscribe():
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
+        """
+        INSERT INTO push_subscriptions (endpoint, p256dh, auth)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (endpoint) DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth
+        """,
         (endpoint, p256dh, auth),
     )
     conn.commit()
