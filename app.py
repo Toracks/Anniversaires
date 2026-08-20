@@ -3,40 +3,28 @@ import json
 import tempfile
 from functools import wraps
 from datetime import timedelta, date
-from zoneinfo import ZoneInfo
 
 import psycopg2
 import psycopg2.extras
 from flask import Flask, request, jsonify, send_from_directory, session, redirect, url_for, render_template
 from werkzeug.security import check_password_hash
 from pywebpush import webpush, WebPushException
-from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
-# Charge les variables du fichier .env (utile en local ; sur Render, les
-# variables d'environnement seront configurées directement dans le dashboard)
 load_dotenv()
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
-# Nécessaire à Flask pour signer/chiffrer le cookie de session
 app.secret_key = os.environ.get("SECRET_KEY")
-# Durée avant expiration de la session : 8 heures
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 APP_PASSWORD_HASH = os.environ.get("APP_PASSWORD_HASH")
 
-# ---------------------------------------------------------------------------
-# Configuration des notifications push (VAPID)
-# ---------------------------------------------------------------------------
 VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")
 VAPID_CONTACT_EMAIL = os.environ.get("EMAIL_DESTINATAIRE", "contact@example.com")
 CRON_SECRET = os.environ.get("CRON_SECRET")
 
-# pywebpush a besoin d'un chemin de fichier vers la clé privée, pas du texte
-# directement : on écrit donc le contenu de la variable d'environnement dans
-# un fichier temporaire au démarrage de l'application.
 _vapid_private_key_path = None
 _vapid_pem_content = os.environ.get("VAPID_PRIVATE_KEY_PEM")
 if _vapid_pem_content:
@@ -45,15 +33,10 @@ if _vapid_pem_content:
     _fichier_temp.close()
     _vapid_private_key_path = _fichier_temp.name
 
-
 def get_db_connection():
     """Ouvre une nouvelle connexion à la base Neon."""
     return psycopg2.connect(DATABASE_URL)
 
-
-# ---------------------------------------------------------------------------
-# Décorateurs de protection
-# ---------------------------------------------------------------------------
 def login_required_page(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -61,7 +44,6 @@ def login_required_page(f):
             return redirect(url_for("login"))
         return f(*args, **kwargs)
     return wrapper
-
 
 def login_required_api(f):
     @wraps(f)
@@ -71,11 +53,6 @@ def login_required_api(f):
         return f(*args, **kwargs)
     return wrapper
 
-
-# ---------------------------------------------------------------------------
-# Envoie une notification push à tous les appareils abonnés pour un
-# anniversaire donné. Renvoie le nombre d'appareils notifiés avec succès.
-# ---------------------------------------------------------------------------
 def envoyer_notification_push(prenom, nom, cur, conn):
     nom_complet = prenom
     if nom:
@@ -109,12 +86,6 @@ def envoyer_notification_push(prenom, nom, cur, conn):
 
     return nb_notifies
 
-
-# ---------------------------------------------------------------------------
-# Si un anniversaire tombe aujourd'hui et n'a pas encore été notifié cette
-# année, envoie la notification tout de suite et marque l'année comme faite
-# (utile quand on ajoute/modifie un anniversaire après l'heure du minuteur).
-# ---------------------------------------------------------------------------
 def notifier_si_aujourdhui(anniversaire_id, prenom, nom, jour, mois, cur, conn):
     aujourdhui = date.today()
     if jour != aujourdhui.day or mois != aujourdhui.month:
@@ -132,13 +103,6 @@ def notifier_si_aujourdhui(anniversaire_id, prenom, nom, jour, mois, cur, conn):
     )
     conn.commit()
 
-
-# ---------------------------------------------------------------------------
-# La vérification quotidienne elle-même : cherche les anniversaires du jour
-# pas encore notifiés cette année, et envoie les notifications. Utilisée à la
-# fois par le minuteur interne (automatique, 8h) et par la route manuelle
-# /cron/verifier-anniversaires (pratique pour tester à la main).
-# ---------------------------------------------------------------------------
 def executer_verification_quotidienne():
     aujourdhui = date.today()
     annee_courante = aujourdhui.year
@@ -147,12 +111,6 @@ def executer_verification_quotidienne():
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     cur.execute(
-        """
-        SELECT id, prenom, nom
-        FROM anniversaires
-        WHERE jour = %s AND mois = %s
-          AND (derniere_annee_notifiee IS NULL OR derniere_annee_notifiee != %s)
-        """,
         (aujourdhui.day, aujourdhui.month, annee_courante),
     )
     anniversaires_du_jour = cur.fetchall()
@@ -174,63 +132,15 @@ def executer_verification_quotidienne():
         "notifies": nb_notifies,
     }
 
-
-# ---------------------------------------------------------------------------
-# Minuteur interne : tourne DANS le processus Flask, tant qu'il est éveillé.
-# Se déclenche tous les jours à 8h00 (heure de Paris), sans passer par une
-# requête HTTP externe — donc rien que Render/Cloudflare puisse bloquer.
-#
-# Limite à connaître : si le service est en veille (Render gratuit, après 15
-# min d'inactivité), ce minuteur ne tourne pas non plus, puisque le processus
-# entier est arrêté. Il faut donc toujours qu'un signal extérieur (cron-job.org
-# sur /ping) réveille le service un peu avant 8h.
-# ---------------------------------------------------------------------------
-def _demarrer_minuteur():
-    scheduler = BackgroundScheduler(timezone=ZoneInfo("Europe/Paris"))
-    scheduler.add_job(executer_verification_quotidienne, "cron", hour=8, minute=0)
-    scheduler.start()
-
-
-# Le "if" évite que le minuteur démarre deux fois en local à cause du
-# rechargeur automatique de Flask (debug=True lance le code applicatif deux
-# fois). En production (Render, via gunicorn), cette variable n'existe pas,
-# donc le minuteur démarre normalement.
-if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-    _demarrer_minuteur()
-
-
-# ---------------------------------------------------------------------------
-# Route ultra simple, utilisée uniquement pour réveiller Render (cron-job.org
-# vise cette adresse chaque matin). Réponse volontairement minuscule.
-# ---------------------------------------------------------------------------
-@app.route("/ping")
-def ping():
-    return "OK"
-
-
-# ---------------------------------------------------------------------------
-# Sert le service worker depuis la racine (/sw.js) plutôt que /static/sw.js :
-# un service worker ne peut contrôler que les pages situées dans son propre
-# dossier (ou en dessous) par défaut. En le servant depuis la racine, il
-# couvre tout le site, y compris la page d'accueil "/".
-# ---------------------------------------------------------------------------
 @app.route("/sw.js")
 def service_worker():
     return send_from_directory(app.static_folder, "sw.js")
 
-
-# ---------------------------------------------------------------------------
-# Page d'accueil : sert le calendrier (protégée par mot de passe)
-# ---------------------------------------------------------------------------
 @app.route("/")
 @login_required_page
 def index():
     return send_from_directory(app.template_folder, "index.html")
 
-
-# ---------------------------------------------------------------------------
-# Connexion / déconnexion
-# ---------------------------------------------------------------------------
 @app.route("/login", methods=["GET", "POST"])
 def login():
     erreur = None
@@ -244,27 +154,17 @@ def login():
         erreur = "Mot de passe incorrect."
     return render_template("login.html", erreur=erreur)
 
-
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("login"))
 
-
-# ---------------------------------------------------------------------------
-# GET /api/anniversaires
-# ---------------------------------------------------------------------------
 @app.route("/api/anniversaires", methods=["GET"])
 @login_required_api
 def liste_anniversaires():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        """
-        SELECT id, prenom, nom, jour, mois, annee, heure
-        FROM anniversaires
-        ORDER BY mois, jour
-        """
     )
     resultats = cur.fetchall()
     cur.close()
@@ -276,10 +176,6 @@ def liste_anniversaires():
 
     return jsonify(resultats)
 
-
-# ---------------------------------------------------------------------------
-# GET /api/anniversaires/recherche?q=jean
-# ---------------------------------------------------------------------------
 @app.route("/api/anniversaires/recherche", methods=["GET"])
 @login_required_api
 def recherche_anniversaires():
@@ -290,12 +186,6 @@ def recherche_anniversaires():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        """
-        SELECT id, prenom, nom, jour, mois, annee, heure
-        FROM anniversaires
-        WHERE prenom ILIKE %s
-        ORDER BY mois, jour
-        """,
         (f"%{terme}%",),
     )
     resultats = cur.fetchall()
@@ -308,10 +198,6 @@ def recherche_anniversaires():
 
     return jsonify(resultats)
 
-
-# ---------------------------------------------------------------------------
-# POST /api/anniversaires
-# ---------------------------------------------------------------------------
 @app.route("/api/anniversaires", methods=["POST"])
 @login_required_api
 def ajouter_anniversaire():
@@ -342,11 +228,6 @@ def ajouter_anniversaire():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        """
-        INSERT INTO anniversaires (prenom, nom, jour, mois, annee, heure)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        RETURNING id, prenom, nom, jour, mois, annee, heure
-        """,
         (prenom, nom, jour, mois, annee, heure),
     )
     nouvel_anniversaire = cur.fetchone()
@@ -362,10 +243,6 @@ def ajouter_anniversaire():
 
     return jsonify(nouvel_anniversaire), 201
 
-
-# ---------------------------------------------------------------------------
-# PUT /api/anniversaires/<id>
-# ---------------------------------------------------------------------------
 @app.route("/api/anniversaires/<int:anniversaire_id>", methods=["PUT"])
 @login_required_api
 def modifier_anniversaire(anniversaire_id):
@@ -393,13 +270,6 @@ def modifier_anniversaire(anniversaire_id):
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        """
-        UPDATE anniversaires
-        SET prenom = %s, nom = %s, jour = %s, mois = %s, annee = %s, heure = %s,
-            derniere_annee_notifiee = NULL
-        WHERE id = %s
-        RETURNING id, prenom, nom, jour, mois, annee, heure
-        """,
         (prenom, nom, jour, mois, annee, heure, anniversaire_id),
     )
     resultat = cur.fetchone()
@@ -420,10 +290,6 @@ def modifier_anniversaire(anniversaire_id):
 
     return jsonify(resultat)
 
-
-# ---------------------------------------------------------------------------
-# DELETE /api/anniversaires/<id>
-# ---------------------------------------------------------------------------
 @app.route("/api/anniversaires/<int:anniversaire_id>", methods=["DELETE"])
 @login_required_api
 def supprimer_anniversaire(anniversaire_id):
@@ -440,19 +306,11 @@ def supprimer_anniversaire(anniversaire_id):
 
     return jsonify({"succes": True})
 
-
-# ---------------------------------------------------------------------------
-# GET /api/vapid-public-key
-# ---------------------------------------------------------------------------
 @app.route("/api/vapid-public-key", methods=["GET"])
 @login_required_api
 def vapid_public_key():
     return jsonify({"publicKey": VAPID_PUBLIC_KEY})
 
-
-# ---------------------------------------------------------------------------
-# POST /api/push-subscribe
-# ---------------------------------------------------------------------------
 @app.route("/api/push-subscribe", methods=["POST"])
 @login_required_api
 def push_subscribe():
@@ -468,11 +326,6 @@ def push_subscribe():
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
-        """
-        INSERT INTO push_subscriptions (endpoint, p256dh, auth)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (endpoint) DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth
-        """,
         (endpoint, p256dh, auth),
     )
     conn.commit()
@@ -481,12 +334,6 @@ def push_subscribe():
 
     return jsonify({"succes": True}), 201
 
-
-# ---------------------------------------------------------------------------
-# GET /cron/verifier-anniversaires?secret=...
-# Route manuelle de secours (pratique pour tester à la main). Le déclenchement
-# automatique quotidien passe maintenant par le minuteur interne ci-dessus.
-# ---------------------------------------------------------------------------
 @app.route("/cron/verifier-anniversaires", methods=["GET"])
 def verifier_anniversaires():
     secret_fourni = request.args.get("secret")
@@ -495,7 +342,6 @@ def verifier_anniversaires():
 
     resultat = executer_verification_quotidienne()
     return jsonify(resultat)
-
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
